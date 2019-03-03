@@ -23,6 +23,9 @@ class EKF(object):
         # update self.x, self.P
         ##############
 
+        self.x = g
+        self.P = np.matmul(Gx, np.matmul(self.P, Gx.T)) + dt * np.matmul(Gu, np.matmul(self.Q, Gu.T))
+
     # Propagates exact (nonlinear) state dynamics; also returns associated Jacobians for EKF linearization
     # INPUT:  (u, dt)
     #       u - zero-order hold control input
@@ -48,6 +51,11 @@ class EKF(object):
         # update self.x, self.P
         ##############
 
+        sigma = np.dot(H, np.matmul(self.P, H.T)) + R
+        K = np.dot(self.P, np.dot(H.T, np.linalg.inv(sigma)))
+        self.x = self.x + np.dot(K, z)
+        self.P = self.P - np.dot(K, np.dot(sigma, K.T))
+
     # Converts raw measurement into the relevant Gaussian form (e.g., a dimensionality reduction);
     # also returns associated Jacobian for EKF linearization
     # INPUT:  (rawZ, rawR)
@@ -71,12 +79,39 @@ class Localization_EKF(EKF):
 
     # Unicycle dynamics (Turtlebot 2)
     def transition_model(self, u, dt):
-        v, om = u
+        V, om = u
         x, y, th = self.x
 
         #### TODO ####
         # compute g, Gx, Gu
         ##############
+        th_n = th + om * dt
+
+        if ( abs(om) < 1e-10 ): #essentially revert to regular xt = xt-1 +xdot *dt
+        	g = np.array([x + V*np.cos(th)*dt, 
+        				  y + V*np.sin(th)*dt,
+        				  th_n])
+
+        	Gx = np.array([[1 , 0 , -V*np.sin(th)*dt],
+        				   [0 , 1 ,  V*np.cos(th)*dt],
+        				   [0 , 0 , 1]])
+
+        	Gu = np.array([[np.cos(th)*dt, 0],
+        				   [np.sin(th)*dt, 0],
+        				   [0            , dt]])
+        else:
+        	g = np.array([x + V/om * (np.sin(th_n) - np.sin(th)),
+        				  y - V/om * (np.cos(th_n) - np.cos(th)),
+        				  th_n])
+
+        	Gx = np.array([[1 , 0 , V/om *(np.cos(th_n) - np.cos(th))],
+        				  [0 , 1 , V/om *(np.sin(th_n) - np.sin(th))],
+        				  [0 , 0 , 1]])
+
+        	Gu = np.array([[ 1/om*(np.sin(th_n)-np.sin(th)), -V/om**2 * (np.sin(th_n) - np.sin(th)) + V/om * np.cos(th_n)*dt],
+						  [-1/om*(np.cos(th_n)-np.cos(th)),  V/om**2 * (np.cos(th_n) - np.cos(th)) + V/om * np.sin(th_n)*dt],
+						  [0 , dt]])
+
 
         return g, Gx, Gu
 
@@ -93,6 +128,15 @@ class Localization_EKF(EKF):
         #### TODO ####
         # compute h, Hx
         ##############
+
+        x,   y,   th   = self.x
+        x_c, y_c, th_c = self.tf_base_to_camera
+
+        h = np.array([alpha - th - th_c,
+                      r - (x*np.cos(alpha) + y*np.sin(alpha)) - (x_c*np.cos(alpha - th) + y_c*np.sin(alpha - th)) ])
+
+        Hx = np.array([[0 , 0 , -1],
+        	 		  [-np.cos(alpha), -np.sin(alpha), -x_c*np.sin(alpha-th) + y_c*np.cos(alpha-th)]])
 
         flipped, h = normalize_line_parameters(h)
         if flipped:
@@ -115,6 +159,45 @@ class Localization_EKF(EKF):
         # compute v_list, R_list, H_list
         ##############
 
+        I = len(rawR)
+        J = self.map_lines.shape[1]
+
+    	v_list = []
+        R_list = []
+        H_list = []
+
+        #abort if either list is empty
+        if I == 0 or J == 0:
+            return v_list, R_list, H_list
+
+        for i in range(I):
+
+            #Reset min to max number
+            d_min = float("inf")
+            z_i = rawZ[:, i]
+            R_i = rawR[i]
+
+            for j in range(J):
+                h_ij, Hx_j = self.map_line_to_predicted_measurement(self.map_lines[:, j])
+                
+                #Compute Mahalanobis distance
+                v_ij = z_i - h_ij
+                S_ij = np.matmul(Hx_j, np.matmul(self.P,  Hx_j.T)) + R_i
+                d_ij = np.matmul(v_ij.T, np.matmul(np.linalg.inv(S_ij), v_ij))
+
+                #Determine feature with smallest associate distance
+                if d_ij < d_min:
+                    d_min = d_ij
+                    v_min = v_ij
+                    R_min = R_i
+                    H_min = Hx_j
+
+            # Add smallest mahalanobis distance line to v_list
+            if d_min < self.g**2:
+                v_list.append(v_min)
+                R_list.append(R_min)
+                H_list.append(H_min)
+
         return v_list, R_list, H_list
 
     # Assemble one joint measurement, covariance, and Jacobian from the individual values corresponding to each
@@ -128,6 +211,10 @@ class Localization_EKF(EKF):
         #### TODO ####
         # compute z, R, H
         ##############
+
+        z = np.concatenate(v_list)
+        R = scipy.linalg.block_diag(*R_list)
+        H = np.vstack(H_list)
 
         return z, R, H
 
