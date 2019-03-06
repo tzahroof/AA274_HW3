@@ -4,6 +4,51 @@ import scipy.linalg    # you may find scipy.linalg.block_diag useful
 from ExtractLines import ExtractLines, normalize_line_parameters, angle_difference
 from maze_sim_parameters import LineExtractionParams, NoiseParams, MapParams
 
+#transition model shared between localization_EKF and SLAM_EKF
+def generic_transition_model(V, om, x, y, th, dt):
+    th_n = th + om * dt
+
+    if ( abs(om) < 1e-10 ): #essentially revert to regular xt = xt-1 +xdot *dt
+    	g = np.array([x + V*np.cos(th)*dt, 
+    				  y + V*np.sin(th)*dt,
+    				  th_n])
+
+    	Gx = np.array([[1 , 0 , -V*np.sin(th)*dt],
+    				   [0 , 1 ,  V*np.cos(th)*dt],
+    				   [0 , 0 , 1]])
+
+    	Gu = np.array([[np.cos(th)*dt, 0],
+    				   [np.sin(th)*dt, 0],
+    				   [0            , dt]])
+    else:
+    	g = np.array([x + V/om * (np.sin(th_n) - np.sin(th)),
+    				  y - V/om * (np.cos(th_n) - np.cos(th)),
+    				  th_n])
+
+    	Gx = np.array([[1 , 0 , V/om *(np.cos(th_n) - np.cos(th))],
+    				  [0 , 1 , V/om *(np.sin(th_n) - np.sin(th))],
+    				  [0 , 0 , 1]])
+
+    	Gu = np.array([[ 1/om*(np.sin(th_n)-np.sin(th)), -V/om**2 * (np.sin(th_n) - np.sin(th)) + V/om * np.cos(th_n)*dt],
+					  [-1/om*(np.cos(th_n)-np.cos(th)),  V/om**2 * (np.cos(th_n) - np.cos(th)) + V/om * np.sin(th_n)*dt],
+					  [0 , dt]])
+
+    return g, Gx, Gu
+
+#mapping of line to predicted measurements shared between localization_EKF and SLAM_EKF
+def generic_map_line_to_predicted_measurement(alpha,r,robot_loc,cam_loc):
+
+    x,   y,   th   = robot_loc
+    x_c, y_c, th_c = cam_loc
+
+    h = np.array([alpha - th - th_c,
+                  r - (x*np.cos(alpha) + y*np.sin(alpha)) - (x_c*np.cos(alpha - th) + y_c*np.sin(alpha - th)) ])
+
+    Hx = np.array([[0 , 0 , -1],
+    	 		  [-np.cos(alpha), -np.sin(alpha), -x_c*np.sin(alpha-th) + y_c*np.cos(alpha-th)]])
+
+    return h, Hx
+
 class EKF(object):
 
     def __init__(self, x0, P0, Q):
@@ -79,41 +124,16 @@ class Localization_EKF(EKF):
 
     # Unicycle dynamics (Turtlebot 2)
     def transition_model(self, u, dt):
-        V, om = u
-        x, y, th = self.x
+	    V, om = u
+	    x, y, th = self.x
 
-        #### TODO ####
-        # compute g, Gx, Gu
-        ##############
-        th_n = th + om * dt
+	    #### TODO ####
+	    # compute g, Gx, Gu
+	    ##############
 
-        if ( abs(om) < 1e-10 ): #essentially revert to regular xt = xt-1 +xdot *dt
-        	g = np.array([x + V*np.cos(th)*dt, 
-        				  y + V*np.sin(th)*dt,
-        				  th_n])
+	    g, Gx, Gu = generic_transition_model(V, om, x, y, th, dt)
 
-        	Gx = np.array([[1 , 0 , -V*np.sin(th)*dt],
-        				   [0 , 1 ,  V*np.cos(th)*dt],
-        				   [0 , 0 , 1]])
-
-        	Gu = np.array([[np.cos(th)*dt, 0],
-        				   [np.sin(th)*dt, 0],
-        				   [0            , dt]])
-        else:
-        	g = np.array([x + V/om * (np.sin(th_n) - np.sin(th)),
-        				  y - V/om * (np.cos(th_n) - np.cos(th)),
-        				  th_n])
-
-        	Gx = np.array([[1 , 0 , V/om *(np.cos(th_n) - np.cos(th))],
-        				  [0 , 1 , V/om *(np.sin(th_n) - np.sin(th))],
-        				  [0 , 0 , 1]])
-
-        	Gu = np.array([[ 1/om*(np.sin(th_n)-np.sin(th)), -V/om**2 * (np.sin(th_n) - np.sin(th)) + V/om * np.cos(th_n)*dt],
-						  [-1/om*(np.cos(th_n)-np.cos(th)),  V/om**2 * (np.cos(th_n) - np.cos(th)) + V/om * np.sin(th_n)*dt],
-						  [0 , dt]])
-
-
-        return g, Gx, Gu
+	    return g, Gx, Gu
 
     # Given a single map line m in the world frame, outputs the line parameters in the scanner frame so it can
     # be associated with the lines extracted from the scanner measurements
@@ -129,14 +149,8 @@ class Localization_EKF(EKF):
         # compute h, Hx
         ##############
 
-        x,   y,   th   = self.x
-        x_c, y_c, th_c = self.tf_base_to_camera
+    	h, Hx = generic_map_line_to_predicted_measurement(alpha, r, self.x, self.tf_base_to_camera)
 
-        h = np.array([alpha - th - th_c,
-                      r - (x*np.cos(alpha) + y*np.sin(alpha)) - (x_c*np.cos(alpha - th) + y_c*np.sin(alpha - th)) ])
-
-        Hx = np.array([[0 , 0 , -1],
-        	 		  [-np.cos(alpha), -np.sin(alpha), -x_c*np.sin(alpha-th) + y_c*np.cos(alpha-th)]])
 
         flipped, h = normalize_line_parameters(h)
         if flipped:
@@ -229,7 +243,7 @@ class SLAM_EKF(EKF):
     # Combined Turtlebot + map dynamics
     # Adapt this method from Localization_EKF.transition_model.
     def transition_model(self, u, dt):
-        v, om = u
+        V, om = u
         x, y, th = self.x[:3]
 
         #### TODO ####
@@ -238,7 +252,11 @@ class SLAM_EKF(EKF):
         # Gx = np.eye(self.x.size)
         # Gu = np.zeros((self.x.size, 2))
         ##############
+        g = np.copy(self.x)
+        Gx = np.eye(self.x.size)
+        Gu = np.zeros((self.x.size, 2))
 
+        g[:3], Gx[:3, :3], Gu[:3, :] = generic_transition_model(V, om, x, y, th, dt)
         return g, Gx, Gu
 
     # Combined Turtlebot + map measurement model
@@ -259,6 +277,11 @@ class SLAM_EKF(EKF):
         # compute z, R, H (should be identical to Localization_EKF.measurement_model above)
         ##############
 
+        z = np.concatenate(v_list)
+        R = scipy.linalg.block_diag(*R_list)
+        H = np.vstack(H_list)
+
+
         return z, R, H
 
     # Adapt this method from Localization_EKF.map_line_to_predicted_measurement.
@@ -271,14 +294,22 @@ class SLAM_EKF(EKF):
         #### TODO ####
         # compute h, Hx (you may find the skeleton for computing Hx below useful)
 
+        x,   y,   th   = self.x[:3]
+        x_c, y_c, th_c = self.tf_base_to_camera
+
         Hx = np.zeros((2,self.x.size))
-        Hx[:,:3] = FILLMEIN
+
+        h, Hx[:,:3] = generic_map_line_to_predicted_measurement(alpha, r, self.x[:3], self.tf_base_to_camera)
         # First two map lines are assumed fixed so we don't want to propagate any measurement correction to them
         if j > 1:
-            Hx[0, 3+2*j] = FILLMEIN
-            Hx[1, 3+2*j] = FILLMEIN
-            Hx[0, 3+2*j+1] = FILLMEIN
-            Hx[1, 3+2*j+1] = FILLMEIN
+            Hx[0, 3+2*j] = 1
+            Hx[1, 3+2*j] = x*np.sin(alpha) + y*np.cos(alpha) + x_c*np.sin(alpha-th) + y_c*np.cos(alpha-th)
+            '''
+            Hx[1, 3+2*j] = np.sin(alpha) * (x + x_c *np.cos(th) - y_c * np.sin(th)) + \
+            			   np.cos(alpha) * (y - x_c *np.sin(th) + y_c * np.cos(th))
+		    '''
+            Hx[0, 3+2*j+1] = 0
+            Hx[1, 3+2*j+1] = 1
 
         ##############
 
@@ -294,5 +325,46 @@ class SLAM_EKF(EKF):
         #### TODO ####
         # compute v_list, R_list, H_list
         ##############
+
+        I = rawZ.shape[1]
+        J = (len(self.x) - 3)/2
+
+    	v_list = []
+        R_list = []
+        H_list = []
+
+        #abort if either list is empty
+        if I == 0 or J == 0:
+            return v_list, R_list, H_list
+
+        for i in range(I):
+
+            #Reset min to max number
+            d_min = float("inf")
+            z_i = rawZ[:, i]
+            R_i = rawR[i]
+
+            for j in range(J):
+                h_ij, Hx_j = self.map_line_to_predicted_measurement(j)
+                
+                #Compute Mahalanobis distance
+                v_ij = z_i - h_ij
+                S_ij = np.matmul(Hx_j, np.matmul(self.P,  Hx_j.T)) + R_i
+                d_ij = np.matmul(v_ij.T, np.matmul(np.linalg.inv(S_ij), v_ij))
+
+                #Determine feature with smallest associate distance
+                if d_ij < d_min:
+                    d_min = d_ij
+                    v_min = v_ij
+                    R_min = R_i
+                    H_min = Hx_j
+
+            # Add smallest mahalanobis distance line to v_list
+            if d_min < self.g**2:
+                v_list.append(v_min)
+                R_list.append(R_min)
+                H_list.append(H_min)
+
+
 
         return v_list, R_list, H_list
